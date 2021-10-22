@@ -1,0 +1,277 @@
+---
+title: "2021 soy agriplex marker assessment"
+author: "Zachary H. Lemmon"
+affiliation: "Inari Agriculture"
+date: "7/8/2021"
+output:
+  html_document:
+      toc: true
+          toc_depth: 3
+	      toc_float: true
+	      ---
+
+```{r pre_data, echo=FALSE}
+crosses = read.table('../data/s1_crosses.txt', header=TRUE, sep = '\t')
+```
+
+## Introduction
+
+In the 2021 field season there are `r sum(crosses$Number.of.Lines.in.21NAS_SB_SS)` soybean S1 individuals (across `r sum(crosses$Number.of.Lines.in.21NAS_SB_SS>0)` populations) that were planted and will be selected for advancement in the fall of 2021. There is an interest in using genomic prediction (GP) methods to assess the performance of S1 lines before the end of the field season, but in order to run GP on these plants we need a genotyping assay that will provide a reasonable number of segregating markers at a reasonable price point. To accomplish this genotyping need for Inari's 2021 S1 lines, we are investigating the AgriPlex developed panel of SNP markers for soybean. These markers largely are included in the 6k soybean SNPchip (that we used to genotype our other soybean germplasm). There are a few additional markers that were included in the Agriplex SNP panel that appear to have come from the public sector collaborators to track specific traits, these SNPs have potential value in future trait introgression (TI) work. 
+
+## Purpose
+
+Assess the suitability of the pre-made Agriplex SNP genotyping panel for our current 2021 field season crop of soybean S1 lines in development. This assessment will be done *in silico* leveraging existing line genotypes registered in the Inari vcf-services to infer expected segregation patterns (SNP identity, number, and genomic distribution). 
+
+## Data and Links
+
+Input data will be stored via DAD, analysis code on github. You will also need to set up VCF service/credentials and a few conda environments which are again documented in the DAD archive and in the Rmd notebook.
+
+- DAD: `zhl-analyses/darp-20210708_soy_agriplex_marker_assessment_data`
+  - github: `https://github.com/inari-ag/darp-20210708_soy_agriplex_marker_assessment`
+      - branch: `initial-commit`
+
+## Results and Conclusions
+
+### Results
+
+Key files displaying these results can be found in the `../res/` directory
+
+- All inbred lines of interest have genotype data
+  - Average SNPs per chromosome per cross is ~20
+    - Average total SNPs per cross is ~400
+      - Distribution of SNPs is not entirely even and we do have gaps across the chromosomes
+
+### Conclusions
+
+About a third of the markers (~400) are informative in any given S1 population (founding cross). This means that genomic prediction will be operating on an average of ~400 SNPs per population using the premade Agriplex SNP assay panel. Previous work has shown that ~1000-1500 markers is optimal for achieving maximum prediction accuracy in corn, but we do not have a comparable study in soybean and building a 1000-1500 marker panel for soybean would be cost prohibitive. In fall of 2020 we did see reasonable prediction accuracies for our corn S1/2 populations where we only had ~200 segregating sites per cross. Consequently, moving forward with the premade Agriplex SNP panel looks like a viable genotyping strategy at least for the 2021 soybean S1 populations.
+
+## Code
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Initial data pull
+
+If you do not have it, you will need to pull the above listed DAD tag to the `data` directory. 
+
+```{bash pull_dad, engine.opts='-l'}
+# This will latch onto the .dad file within the data/ directory pulled from github. If not you may need to manually specify the project and tag listed above.
+# dad pull ../data/
+```
+
+### Initial Docker
+
+```{bash initial_docker}
+# Steal previously mapped soybean 6k marker SNPs from the xlsx-to-vcf docker image on ECR
+docker run --rm \
+  -v $PWD/../data:/app/data \
+    335777049998.dkr.ecr.us-east-1.amazonaws.com/xlsx-to-vcf:1.0.3 \
+        awk 'BEGIN{FS="\t"; OFS="\t"}FNR==NR{idarr[$2]=$1; posarr[$2]=$3; next}{if($2 in idarr){print idarr[$2], $0}}' data/snps.txt xlsx_to_vcf/data/gnm1_to_gnm4_with_ssNumber.txt > data/gnm4_snps.txt
+	awk 'BEGIN{FS="\t"; OFS="\t"}FNR==NR{arr[$1]=$0; next}{print $0, arr[$3]}' ../data/6k_snps.txt data/gnm4_snps.txt > ../data/merged_6k_agriplex.txt
+	# Some stats
+	awk 'BEGIN{FS="\t"; OFS="\t"}{print NF}' ../data/merged_6k_agriplex.txt | sort -k1,1n | uniq -c
+	```
+
+### VCF service query
+
+```{bash query_vcf}
+# API_SERVER_BASE_URL required to query vcf-services. Make sure you setup the appropriate variables for where you are.
+echo ${API_SERVER_BASE_URL}
+# Query the vcf-services for a specific soybean genotype file
+docker run --rm \
+  -v $HOME/.aws:/root/.aws:ro \
+    -v $PWD/../vcf-service-working:/tmp \
+      -e API_SERVER_BASE_URL=${API_SERVER_BASE_URL} \
+        335777049998.dkr.ecr.us-east-1.amazonaws.com/vcf-services-client:master \
+	    python3 scripts/multi_sample_query.py --name_filter "= 'soybean-inari-without-duplicate-cultivars-20210121.vcf.gz'"
+	    ```
+
+### Fetch soybean VCF
+
+```{bash fetch_files, engine.opts='-l'}
+# Turn on my base conda env and document the contents
+conda activate base
+conda env export > ../data/base_conda.yaml
+cat ../data/base_conda.yaml
+# Pull the vcf-services registered ID and pull from AWS
+ID=$(jq -r '.[].id' ../vcf-service-working/multi_sample_query.json)
+echo ${ID}
+aws s3 cp --recursive --exclude "*" --include "*${ID}*" s3://inari-vcf-service ../vcf-out
+```
+
+### VCF metadata pull
+
+```{bash pull_meta}
+# Pull metadata
+MDT=`find ../vcf-out -name "*json"`
+MDT=`basename ${MDT}`
+LOOKUP=${MDT/json/lookup.json}
+docker run --rm \
+        -v $HOME/.aws:/root/.aws \
+	        -v $PWD/../vcf-out:/app/out \
+		        -e API_SERVER_BASE_URL=${API_SERVER_BASE_URL} \
+			        --entrypoint python3 \
+				        335777049998.dkr.ecr.us-east-1.amazonaws.com/vcf-services-client:master \
+					        scripts/multisample_mdt_reverse_lookup.py \
+						                --metadata_file out/poc/mdt/multi-sample/${MDT} \
+								                --output_file out/poc/mdt/multi-sample/${LOOKUP} > /dev/null 2>&1
+										```
+
+### VCF meta shaping
+
+```{r read_meta}
+library(rjson)
+meta=fromJSON(file='../vcf-out/poc/mdt/multi-sample/soybean-inari-without-duplicate-cultivars-20210121-523c7cda047f43ddb5cd949fae80c8e7-metadata.lookup.json')
+cultivar = lapply(lapply(meta[['sample_metadata']], '[[', 2), '[[', 5)
+assay = lapply(lapply(meta[['sample_metadata']], '[[', 2), '[[', 6)
+sampld_id = lapply(lapply(meta[['sample_metadata']], '[[', 2), '[[', 7)
+sample_name = lapply(lapply(meta[['sample_metadata']], '[[', 2), '[[', 8)
+source = lapply(lapply(meta[['sample_metadata']], '[[', 2), '[[', 2)
+field_season = lapply(lapply(meta[['sample_metadata']], '[[', 2), '[[', 3)
+meta.frame = data.frame(sample_name=unlist(sample_name), 
+			                        cultivar=unlist(cultivar), 
+						                        source=unlist(source), 
+						                        field_season=unlist(field_season),
+									                        assay=unlist(assay))
+genames = read.table('../data/gename_cultivar.txt', header = TRUE, sep = '\t')
+meta.frame$gename = genames[match(meta.frame$cultivar, genames$Inbred_Name), 'GE_NAME']
+head(meta.frame)
+```
+
+### Explore parents
+
+```{r read_parents_crosses}
+parents = read.table('../data/parents.txt', sep = '\t', header=TRUE)
+# Want to add in the recurrent parents for edit TI, donor is NINF1170 for the edits
+RPs = c('HUNE1430', 'RANF1335', 'TENF1362', 'TENG1686', 'TENC1559', 'TENE1516', 'TENG1501', 'GINF9586', 'GINF9707', 'GINE9013')
+parents_RPs = c(parents$Founding.Parents, RPs[!RPs %in% parents$Founding.Parents])
+sum(duplicated(parents_RPs))  # non are duplicated
+# How many of the founding parents exist in the meta.frame?
+sum(parents$Founding.Parents %in% meta.frame$gename) / nrow(parents)
+# How many of the RPs in the meta.frame?
+sum(RPs %in% meta.frame$gename) / length(RPs)
+# All of them, we have all data. Let's substitute samplenames for genames in the next chunk after we export the samplename\tgename frame
+# Any duplicated genames? Will need to uniquify
+sum(duplicated(meta.frame$gename))  # no duplicated genames so just go with the straight gename
+# rehead_frame = cbind(meta.frame[, c('sample_name')], apply(meta.frame[, c('gename', 'field_season')], 1, FUN = function(x){paste(x, collapse=':')}))
+rehead_frame = meta.frame[, c('sample_name', 'gename')]
+# Any duplicated sample names?
+sum(duplicated(rehead_frame[, 2]))  # nope we're good
+write.table(x=rehead_frame, file='../data/reheader.txt', quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+# Write out the parents+RPs to file for sample subsetting later
+write.table(x=parents_RPs, file='../data/parents_rps.txt', quote=FALSE, row.names=FALSE, col.names=FALSE)
+```
+
+### Reheader VCF
+
+```{bash rename_samples, engine.opts='-l'}
+#Activate and document the samtools conda environment
+conda activate samtools
+conda env export > ../data/samtools_env.yaml
+cat ../data/samtools_env.yaml
+# Find the vcf and use it
+VCF=$(find ../vcf-out -name "*soybean-inari-without-duplicate-cultivars-20210121-523c7cda047f43ddb5cd949fae80c8e7.vcf.gz")
+OUTVCF=${VCF/.vcf.gz/_reheader_subset.vcf.gz}
+bcftools reheader --samples ../data/reheader.txt ${VCF} | bcftools view --samples-file ../data/parents_rps.txt -Oz -o ${OUTVCF}
+tabix -f ${OUTVCF}
+```
+
+### *in silico* cross construction
+
+```{bash insilico_crosses, engine.opts='-l'}
+# Activate samtools conda environment again
+conda activate samtools
+# Parse each cross combination into a phased genotype call, convert hets to missing.
+cut -f4,5 -d$'\t' ../data/gnm4_snps.txt | sort -k1,1 -k2,2n > ../data/gnm4_subset_snps.txt
+VCF=$(find ../vcf-out -name "*_reheader_subset.vcf.gz")
+mkdir -p ../data/cross_genotypes
+while read XD P1_P2 REST; do
+        if [[ ${P1_P2} == 'Pedigree' ]]; then continue; fi
+	        P1=${P1_P2/\/*}
+		        P2=${P1_P2/*\/}
+			        # echo ${P1} ${P2}
+				        bcftools view --samples "${P1},${P2}" --regions-file ../data/gnm4_subset_snps.txt ${VCF} | sed -e 's/0\/1/./g' -e 's/\.\/\././g' | bcftools query -f "%CHROM\t%POS\t%REF\t%ALT[\t%GT]\n" - | awk -v P1=${P1} -v P2=${P2} 'BEGIN{printf("CHROM\tPOS\tREF\tALT\t%s|%s\n", P1, P2)}{gsub(/\/[01]/, "", $5); gsub(/\/[01]/, "", $6); printf("%s\t%s\t%s\t%s\t%s|%s\n", $1, $2, $3, $4, $5, $6)}' > ../data/cross_genotypes/${P1}_${P2}.txt
+					done < ../data/s1_crosses.txt
+					# Let's merge all the individual files
+					paste ../data/cross_genotypes/*txt | awk '{printf("%s\t%s\t%s\t%s", $1, $2, $3, $4); for(i=5; i<=NF; i=i+5){printf("\t%s", $i)} printf("\n")}' > ../data/phased_cross_genotypes.txt
+					# Let's try and summarize a bit
+					awk 'BEGIN{FS="\t"; OFS="\t"}NR==1{print $0, "diff", "total", "percent"; next}{for(i=5;i<=NF;i++){if($i=="0|1" || $i=="1|0"){diff++}}print $0, diff, NF-4, diff/(NF-4); diff=0}' ../data/phased_cross_genotypes.txt > ../data/phased_cross_genotypes_diff_percent.txt
+					# Let's check per cross segregation numbers
+					cut -f1 ../data/phased_cross_genotypes_diff_percent.txt | uniq | awk 'NR==1{next}FNR==NR{chrarr[$1]++}FNR==1{for(i=5;i<=39;i++){namearr[i]=$i}next}{for(i=5;i<=39;i++){if($i=="0|1" || $i=="1|0"){countarr[namearr[i] "_" $1]++}}} END{printf("Cross"); for(key in chrarr){printf("\t%s", key)} printf("\tTotal\n"); for(cross in namearr){printf("%s", namearr[cross]); for(key in chrarr){printf("\t%s", countarr[namearr[cross] "_" key]); tot=tot+countarr[namearr[cross] "_" key]}printf("\t%s\n", tot); tot=0}}' - ../data/phased_cross_genotypes_diff_percent.txt > ../data/markers_per_cross_per_chr.txt
+					# Copy the main file that might be of interest to the `res` directory
+					cp -f ../data/phased_cross_genotypes_diff_percent.txt ../res/phased_cross_genotypes_diff_percent.txt
+					```
+
+```{r plot_cross_chr_count}
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+# Read in the markers per cross per chromosome
+temp_dat = read.table(file = '../data/markers_per_cross_per_chr.txt', header = TRUE, sep = '\t')
+# Melt it
+temp_dat_melt = melt(subset(temp_dat, select = !colnames(temp_dat) == 'Total'), idvar = 'Cross', variable.name = 'Chromosome', value.name = 'SNP count')
+temp_dat_melt$Chromosome = factor(temp_dat_melt$Chromosome, levels=sort(levels(factor(temp_dat_melt$Chromosome))))
+temp_dat_melt = subset(temp_dat_melt, !grepl('scaffold', temp_dat_melt$Chromosome))
+# Plot it
+p = ggplot(temp_dat_melt, aes(x=Cross, y=`SNP count`)) + geom_point() + facet_wrap(.~Chromosome)
+p = p + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+p = p + ggtitle('SNPs segregating on each chromosome for each founding cross')
+print(p)
+temp_dat_melt %>% group_by(Chromosome) %>% summarize(mean=mean(`SNP count`))
+mean(temp_dat_melt$`SNP count`)
+pdf('../res/sites_per_chr_per_cross.pdf', height = 16, width = 24)
+print(p)
+dev.off()
+```
+
+Number of putatitive SNPs segregating on each chromosome for each founding cross. Excluded scaffolds where a single marker segregated on two different scaffolds.
+
+### Percent segregating raw numbers
+
+```{r perc_seg}
+dat = read.table('../data/phased_cross_genotypes_diff_percent.txt', header = TRUE)
+library(tidyr)
+ggplot(dat, aes(x=percent)) + geom_histogram(bins = 20) + ggtitle('Count of SNPs segregating in percent of crosses')
+sixty_seg_dat = dat %>%
+	  # filter(percent > 0.6) %>%
+	  select(grep("CHROM|POS|REF|ALT|diff|total|percent", colnames(dat), value = TRUE, invert = TRUE)) %>%
+	    gather("pop", "geno") %>%
+	      group_by(pop, geno) %>%
+	        count()
+	# str(sixty_seg_dat)
+	seg_sixty_seg_dat = subset(sixty_seg_dat, geno %in% c('1|0', '0|1'))
+	total_counts = seg_sixty_seg_dat %>%
+		  group_by(pop) %>%
+		    summarise(n = sum(n))
+	    total_counts$geno = 'total'
+	    merged = rbind(total_counts, seg_sixty_seg_dat)
+	    min_total = min(subset(merged, geno == 'total')$n)
+	    p = ggplot(merged, aes(x=pop, y=n, colour = geno, shape=geno))
+	    p = p + geom_point()
+	    p = p + geom_abline(slope = 0, intercept = min_total)
+	    p = p + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+	    p = p + expand_limits(y = 0)
+	    p = p + ggtitle('Number of segregating sites in each cross')
+	    print(p)
+	    pdf('../res/sites_per_cross.pdf', height = 12, width = 8)
+	    print(p)
+	    dev.off()
+	    ###
+	    # Going to plot out positioning of markers
+	    markers = dat
+	    dat$gt_60 = dat$percent > 0.6
+	    dat$gt_50 = dat$percent > 0.5
+	    dat$gt_40 = dat$percent > 0.4
+	    ```
+
+```{r, fig.height=12, fig.width=8}
+p = ggplot(dat, aes(x = POS, y = percent, colour=gt_40))
+p = p + expand_limits(y=0)
+p = p + facet_wrap(.~CHROM, ncol = 2)
+p = p + geom_point()
+print(p)
+pdf('../res/site_distribution_across_chr.pdf', height = 12, width = 8)
+print(p)
+dev.off()
+```
